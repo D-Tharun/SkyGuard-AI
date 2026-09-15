@@ -152,19 +152,18 @@ df_station = df[df['station'] == st.session_state.target_station].reset_index(dr
 # Allow manual sliding as well
 st.sidebar.markdown("---")
 st.sidebar.header("Manual Override")
-selected_station = st.sidebar.selectbox("Select Station Feed", df['station'].unique(), index=list(df['station'].unique()).index(st.session_state.target_station))
-jump_to = st.sidebar.slider("Jump to Time Step", 0, len(df_station)-1, st.session_state.target_idx)
 
-# If user manually changed station, update
-if selected_station != st.session_state.target_station:
-    st.session_state.target_station = selected_station
-    df_station = df[df['station'] == selected_station].reset_index(drop=True)
+def reset_idx():
     st.session_state.target_idx = 0
-    st.rerun()
 
-# If user manually changed slider, update
-if jump_to != st.session_state.target_idx:
-    st.session_state.target_idx = jump_to
+st.sidebar.selectbox("Select Station Feed", df['station'].unique(), key="target_station", on_change=reset_idx)
+
+# Safely bound the target_idx in case data reloads changed the max length
+max_idx = max(0, len(df_station) - 1)
+if st.session_state.target_idx > max_idx:
+    st.session_state.target_idx = max_idx
+
+st.sidebar.slider("Jump to Time Step", 0, max_idx, key="target_idx")
 
 idx = st.session_state.target_idx
 row_data = df_station.iloc[idx]
