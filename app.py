@@ -51,16 +51,22 @@ def process_data_with_engines():
     stat = StatisticalQCEngine()
     df['stat_score'], df['spike_flag'], df['freeze_flag'] = stat.run_statistical_checks(df)
     
-    # 3. Simulate ML (LSTM/IForest) scores based on ground truth for demo
-    # We do this because kaggle weights aren't present in this sandbox
-    df['lstm_score'] = 0.1
-    df['if_score'] = 0.1
+    # 3. Real ML Inference
+    from src.models.iforest_model import MultivariateIForest
+    from src.models.lstm_ae_model import TemporalLSTMAE
     
-    df.loc[df['fault_type'] == 'SPIKE', 'if_score'] = 0.9
-    df.loc[df['fault_type'] == 'SPIKE', 'lstm_score'] = 0.9
-    
-    df.loc[df['is_genuine_event'] == 1, 'if_score'] = 0.7 
-    df.loc[df['is_genuine_event'] == 1, 'lstm_score'] = 0.3
+    try:
+        iforest = MultivariateIForest()
+        iforest.load(os.path.join(BASE_DIR, 'models', 'iforest_v2.pkl'))
+        
+        lstm_ae = TemporalLSTMAE()
+        lstm_ae.load(os.path.join(BASE_DIR, 'models', 'lstm_ae_v2'))
+        
+        df['if_score'] = iforest.predict(df)
+        df['lstm_score'] = lstm_ae.predict(df)
+    except Exception as e:
+        st.error(f"Failed to load ML artifacts: {e}. Please ensure Kaggle weights are downloaded.")
+        st.stop()
     
     # 4. Fusion Engine
     fusion = EventAwareFusionEngine()
@@ -145,11 +151,13 @@ st.plotly_chart(fig, use_container_width=True)
 
 # --- Explainability Panel ---
 st.markdown("### Event vs Anomaly Evidence (XAI)")
-c1, c2, c3 = st.columns(3)
-c1.metric("S_anomaly (Fault Evidence)", f"{row_data['S_anomaly']:.2f}")
-c2.metric("S_event (Event Evidence)", f"{row_data['S_event']:.2f}")
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("IForest Score", f"{row_data['if_score']:.2f}")
+c2.metric("LSTM Score", f"{row_data['lstm_score']:.2f}")
+c3.metric("S_anomaly", f"{row_data['S_anomaly']:.2f}")
+c4.metric("S_event", f"{row_data['S_event']:.2f}")
 spatial_str = f"{row_data['spatial_deviation']:.1f}°C diff" if row_data['spatial_evidence_available'] else "Unavailable"
-c3.metric("Spatial Evidence (Neighbour Dev)", spatial_str)
+c5.metric("Spatial", spatial_str)
 
 # --- Auto Play Logic ---
 if auto_play:
