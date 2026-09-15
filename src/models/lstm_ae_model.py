@@ -140,19 +140,24 @@ class TemporalLSTMAE:
         return padded_scores
         
     def save(self, filepath):
-        """Save Keras model and scaler to disk."""
+        """Save Keras model weights and scaler to disk."""
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        self.model.save(filepath + '.keras')
+        self.model.save_weights(filepath + '.weights.h5')
         import joblib
         joblib.dump(self.scaler, filepath + '_scaler.pkl')
-        print(f"Model saved to {filepath}.keras")
+        print(f"Model saved to {filepath}.weights.h5")
         
     def load(self, filepath):
-        """Load Keras model and scaler from disk."""
+        """Load Keras model weights and scaler from disk."""
         import joblib
-        self.model = load_model(filepath + '.keras')
         self.scaler = joblib.load(filepath + '_scaler.pkl')
-        print(f"Model loaded from {filepath}.keras")
+        
+        # Manually construct architecture to bypass Keras serialization bugs
+        self.model = self._build_model(len(self.features))
+        
+        # Load only the raw weights
+        self.model.load_weights(filepath + '.weights.h5')
+        print(f"Model loaded from {filepath}.weights.h5")
 
 if __name__ == "__main__":
     # Test script
