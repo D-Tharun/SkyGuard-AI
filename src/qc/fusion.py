@@ -183,8 +183,12 @@ class EventAwareFusionEngine:
         # Default fallback
         return "UNCERTAIN_REVIEW", f"Scores in grey area. S_a={S_a:.2f}, S_e={S_e:.2f}", confidence - 0.3
 
-    def run_fusion(self, df):
-        """Run the full event-aware fusion and diagnosis pipeline."""
+    def run_fusion(self, df, disable_spatial=False):
+        """
+        Executes the full event-aware fusion pipeline.
+        Returns dataframe with 'final_state', 'reason', and 'confidence'.
+        If disable_spatial is True, skips spatial evidence calculation and forces it to unavailable.
+        """
         df_out = df.copy()
         
         # Ensure base columns
@@ -193,7 +197,12 @@ class EventAwareFusionEngine:
                 df_out[col] = 0.0
                 
         # 1. Pre-calculate spatial & temporal features
-        df_out = self._calculate_spatial_evidence(df_out)
+        if disable_spatial:
+            df_out['spatial_deviation'] = np.nan
+            df_out['spatial_evidence_available'] = False
+        else:
+            df_out = self._calculate_spatial_evidence(df_out)
+            
         df_out = self._calculate_temporal_multivariate_event_evidence(df_out)
         
         # 2. Calculate S_anomaly and S_event

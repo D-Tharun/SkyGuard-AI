@@ -93,17 +93,53 @@ class TemporalLSTMAE:
         print("LSTM Training complete.")
         return history
         
+    def _calibrate_score(self, raw):
+        """
+        Piecewise empirical calibration mapping based on 2024 Clean Validation Set.
+        p95: 0.063 (Borderline suspicious)
+        p999: 0.107 (Extreme tail anomaly)
+        """
+        p95 = 0.063
+        p999 = 0.107
+        
+        scores = np.zeros_like(raw)
+        
+        # Normal Range
+        mask1 = raw <= p95
+        scores[mask1] = (raw[mask1] / p95) * 0.3
+        
+        # Suspicious Range
+        mask2 = (raw > p95) & (raw <= p999)
+        scores[mask2] = 0.3 + ((raw[mask2] - p95) / (p999 - p95)) * 0.2
+        
+        # Anomalous Range
+        mask3 = raw > p999
+        scores[mask3] = np.clip(0.5 + ((raw[mask3] - p999) / p999) * 0.5, 0.5, 1.0)
+        
+        return scores
+        
     def predict(self, df):
         """
-        Predict anomaly scores based on Mean Absolute Error (MAE) of reconstruction.
-        Returns a normalized score array aligned with the dataframe (padded with 0s at the start).
+        Predict anomalies. Returns normalized reconstruction error [0, 1].
+        1 = Highly Anomalous, 0 = Normal.
         """
         if 'station' not in df.columns:
             raise ValueError("Dataframe must contain 'station' column for correct sequence alignment.")
             
         df = df.copy()
-        data_values = df[self.features].values
-        scaled_data = self.scaler.transform(data_values)
+        data_values = df[self.features].astype(float).values
+        
+        # Safely handle missing/corrupt data before scaling/inference
+        # Mask -999.0, 9999.0 as NaN
+        data_values[data_values == -999.0] = np.nan
+        data_values[data_values == 9999.0] = np.nan
+        
+        # Convert to DataFrame for easy ffill/bfill, then back to numpy
+        temp_df = pd.DataFrame(data_values)
+        temp_df = temp_df.ffill().bfill().fillna(0) # fallback to 0 if all NaNs
+        data_values_clean = temp_df.values
+        
+        scaled_data = self.scaler.transform(data_values_clean)
         
         scaled_cols = [f + '_scaled' for f in self.features]
         df[scaled_cols] = scaled_data
@@ -126,9 +162,8 @@ class TemporalLSTMAE:
             # Calculate MAE for each sequence (average across time steps and features)
             mae = np.mean(np.abs(X_pred - X_seq), axis=(1, 2))
             
-            # Normalize MAE to [0, 1] range robustly
-            # Data was scaled to [0,1]. Normal MAE is usually < 0.05. Anomalous is > 0.1.
-            norm_scores = np.clip(mae / 0.2, 0, 1)
+            # Normalize using empirical piecewise calibration
+            norm_scores = self._calibrate_score(mae)
                 
             # Pad the start of the array to match original dataframe length for this station
             station_padded_scores = np.zeros(len(group))

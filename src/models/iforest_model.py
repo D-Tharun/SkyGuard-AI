@@ -61,6 +61,37 @@ class MultivariateIForest:
         self.model.fit(X_scaled)
         print("Training complete.")
         
+    def _calibrate_score(self, raw):
+        """
+        Piecewise empirical calibration mapping based on 2024 Clean Validation Set.
+        p95: -0.041 (Borderline suspicious)
+        p999: 0.039 (Extreme tail anomaly)
+        """
+        p95 = -0.041
+        p999 = 0.039
+        
+        # Vectorized implementation
+        scores = np.zeros_like(raw)
+        
+        # Normal Range
+        mask1 = raw <= p95
+        # Prevent divide by zero or extreme negatives, map strictly to [0, 0.3]
+        # raw is typically between -0.1 and -0.041
+        # Map linear from -0.1 to -0.041 -> 0 to 0.3
+        # Since lower means more normal, just clip and scale
+        norm_val = np.clip((raw[mask1] - (-0.1)) / (p95 - (-0.1)), 0, 1)
+        scores[mask1] = norm_val * 0.3
+        
+        # Suspicious Range
+        mask2 = (raw > p95) & (raw <= p999)
+        scores[mask2] = 0.3 + ((raw[mask2] - p95) / (p999 - p95)) * 0.2
+        
+        # Anomalous Range
+        mask3 = raw > p999
+        scores[mask3] = np.clip(0.5 + ((raw[mask3] - p999) / p999) * 0.5, 0.5, 1.0)
+        
+        return scores
+
     def predict(self, df):
         """
         Predict anomalies. Returns normalized anomaly scores [0, 1].
@@ -76,9 +107,7 @@ class MultivariateIForest:
         # Invert so positive means anomalous
         inverted_scores = -raw_scores
         
-        # Robust scaling to prevent extreme outliers (like T=9999) from squashing subtle anomalies
-        # Normal data usually has score < 0.0. Anomalies > 0.0.
-        norm_scores = np.clip((inverted_scores + 0.05) / 0.15, 0, 1)
+        norm_scores = self._calibrate_score(inverted_scores)
         
         return norm_scores
         

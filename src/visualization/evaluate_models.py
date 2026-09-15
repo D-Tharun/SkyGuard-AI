@@ -84,7 +84,10 @@ def get_conventional_preds(df):
     return ((df['spike_flag'] > 0) | (df['freeze_flag'] > 0) | (df['physics_score'] > 0.5)).astype(int)
 
 def get_ml_preds(df):
-    return (df['if_score'] > 0.6).astype(int)
+    preds_if = (df['if_score'] > 0.6).astype(int)
+    preds_lstm = (df['lstm_score'] > 0.6).astype(int)
+    preds_combined = ((df['if_score'] > 0.6) | (df['lstm_score'] > 0.6)).astype(int)
+    return preds_if, preds_lstm, preds_combined
 
 def calculate_metrics(y_true, y_pred):
     p = precision_score(y_true, y_pred, zero_division=0)
@@ -101,10 +104,24 @@ def main():
     
     print("Loading V2 National Benchmark...")
     df_nat = load_data('national_benchmark_v2_injected.csv')
-    df_nat = run_base_models(df_nat, is_demo=False)
+    
+    # Run with REAL integrated Kaggle ML artifacts
+    df_nat = run_base_models(df_nat, is_demo=False, use_real_ml=True)
     
     fusion = EventAwareFusionEngine()
     df_nat_full = fusion.run_fusion(df_nat)
+    
+    print("\n--- DATASET STATISTICS ---")
+    total_obs = len(df_nat)
+    normal_obs = len(df_nat[df_nat['anomaly_label'] == 0])
+    print(f"Total Observations: {total_obs}")
+    print(f"Normal Observations: {normal_obs}")
+    print(f"Number of Stations: {df_nat['station'].nunique()}")
+    print("\nInjected Faults by Type:")
+    fault_counts = df_nat[df_nat['anomaly_label'] > 0]['anomaly_label'].value_counts().sort_index()
+    fault_names = {1: 'SPIKE', 2: 'DRIFT', 3: 'FROZEN', 4: 'RANGE', 5: 'COMMUNICATION', 6: 'MULTIVARIATE'}
+    for k, v in fault_counts.items():
+        print(f"  {fault_names.get(k, 'UNKNOWN')}: {v}")
     
     # Generate Audit Log for National Benchmark
     audit_df = pd.DataFrame({
@@ -129,20 +146,29 @@ def main():
 
     y_true_all = (df_nat['anomaly_label'] > 0).astype(int)
     preds_conv = get_conventional_preds(df_nat)
-    preds_ml = get_ml_preds(df_nat)
-    preds_full = df_nat_full['final_state'].isin(['SENSOR_FAULT', 'DATA_COMMUNICATION_FAULT', 'UNCERTAIN_REVIEW']).astype(int)
+    preds_if, preds_lstm, preds_combined = get_ml_preds(df_nat)
+    
+    # Complete taxonomy of faults to prevent false-negative penalization of correctly detected subtypes
+    fault_taxonomy = [
+        'SENSOR_FAULT', 'DATA_COMMUNICATION_FAULT', 'UNCERTAIN_REVIEW',
+        'SPIKE_FAULT', 'DRIFT_FAULT', 'FROZEN_FAULT', 'RANGE_FAULT', 
+        'COMMUNICATION_FAULT', 'MULTIVARIATE_FAULT'
+    ]
+    preds_full = df_nat_full['final_state'].isin(fault_taxonomy).astype(int)
     
     print("\n--- FINAL BENCHMARK ---")
     c_p, c_r, c_f, c_fpr = calculate_metrics(y_true_all, preds_conv)
-    m_p, m_r, m_f, m_fpr = calculate_metrics(y_true_all, preds_ml)
+    if_p, if_r, if_f, if_fpr = calculate_metrics(y_true_all, preds_if)
+    lstm_p, lstm_r, lstm_f, lstm_fpr = calculate_metrics(y_true_all, preds_lstm)
+    ml_p, ml_r, ml_f, ml_fpr = calculate_metrics(y_true_all, preds_combined)
     f_p, f_r, f_f, f_fpr = calculate_metrics(y_true_all, preds_full)
     
-    print(f"{'Metric':<20} | {'Conventional QC':<15} | {'ML-Only':<15} | {'Full SkyGuard':<15}")
-    print("-" * 75)
-    print(f"{'Precision':<20} | {c_p:<15.4f} | {m_p:<15.4f} | {f_p:<15.4f}")
-    print(f"{'Recall':<20} | {c_r:<15.4f} | {m_r:<15.4f} | {f_r:<15.4f}")
-    print(f"{'Overall F1':<20} | {c_f:<15.4f} | {m_f:<15.4f} | {f_f:<15.4f}")
-    print(f"{'FPR':<20} | {c_fpr:<15.4f} | {m_fpr:<15.4f} | {f_fpr:<15.4f}")
+    print(f"{'Metric':<15} | {'Conv QC':<10} | {'IForest':<10} | {'LSTM':<10} | {'ML-Only':<10} | {'Full SkyGuard':<15}")
+    print("-" * 80)
+    print(f"{'Precision':<15} | {c_p:<10.4f} | {if_p:<10.4f} | {lstm_p:<10.4f} | {ml_p:<10.4f} | {f_p:<15.4f}")
+    print(f"{'Recall':<15} | {c_r:<10.4f} | {if_r:<10.4f} | {lstm_r:<10.4f} | {ml_r:<10.4f} | {f_r:<15.4f}")
+    print(f"{'Overall F1':<15} | {c_f:<10.4f} | {if_f:<10.4f} | {lstm_f:<10.4f} | {ml_f:<10.4f} | {f_f:<15.4f}")
+    print(f"{'FPR':<15} | {c_fpr:<10.4f} | {if_fpr:<10.4f} | {lstm_fpr:<10.4f} | {ml_fpr:<10.4f} | {f_fpr:<15.4f}")
     
     # Latency dummy for now since we run batch
     print(f"{'Detection Latency':<20} | {'0.0s':<15} | {'~15.0ms':<15} | {'~25.0ms':<15}")
@@ -156,21 +182,21 @@ def main():
         y_true_class = (df_nat.loc[mask, 'anomaly_label'] > 0).astype(int)
         
         c_f = f1_score(y_true_class, preds_conv[mask], zero_division=0)
-        m_f = f1_score(y_true_class, preds_ml[mask], zero_division=0)
+        m_f = f1_score(y_true_class, preds_combined[mask], zero_division=0)
         f_f = f1_score(y_true_class, preds_full[mask], zero_division=0)
         
         print(f"{class_name:<20} | {c_f:<15.4f} | {m_f:<15.4f} | {f_f:<15.4f}")
 
     print("\nLoading Demo Scenario Dataset (Genuine Events)...")
     df_demo = load_data('delhi_benchmark_injected.csv')
-    df_demo = run_base_models(df_demo, is_demo=True)
+    df_demo = run_base_models(df_demo, is_demo=True, use_real_ml=True)
     df_demo_full = fusion.run_fusion(df_demo)
     
     genuine_mask = (df_demo_full['is_genuine_event'] == 1) & (df_demo_full['fault_type'] == 'NONE')
     df_genuine = df_demo_full[genuine_mask]
     n_obs = len(df_genuine)
     
-    preds_demo_full = df_demo_full['final_state'].isin(['SENSOR_FAULT', 'DATA_COMMUNICATION_FAULT', 'UNCERTAIN_REVIEW'])
+    preds_demo_full = df_demo_full['final_state'].isin(fault_taxonomy)
     false_alerts = preds_demo_full[genuine_mask].sum()
     fpr = false_alerts / n_obs if n_obs > 0 else 0
     gepr = 1 - fpr
@@ -188,10 +214,26 @@ def main():
     detected = preds_demo_full[event_fault_mask].sum()
     total_faults_in_event = len(df_event_fault)
     acc = detected / total_faults_in_event if total_faults_in_event > 0 else 0
+    print(f"Number of event + fault cases: {total_faults_in_event}")
     print(f"Detected {detected} out of {total_faults_in_event} faults injected during genuine events (Acc: {acc:.4f})")
     
     for i, row in df_event_fault.iterrows():
         print(f"  Station {row['station']} at {row['timestamp']}: {row['fault_type']} -> Final Decision: {row['final_state']}")
+        
+    print("\n--- SPATIAL-UNAVAILABLE PERFORMANCE ---")
+    # Evaluate with proper disable_spatial flag
+    df_demo_no_spatial = df_demo.copy()
+    df_demo_no_spatial_full = fusion.run_fusion(df_demo_no_spatial, disable_spatial=True)
+    
+    # Audit assertions
+    assert df_demo_full['spatial_evidence_available'].sum() > 0, "Spatial evidence should be ON natively"
+    assert df_demo_no_spatial_full['spatial_evidence_available'].sum() == 0, "Spatial evidence should be OFF when disabled"
+    
+    preds_no_spatial = df_demo_no_spatial_full['final_state'].isin(fault_taxonomy)
+    false_alerts_no_spatial = preds_no_spatial[genuine_mask].sum()
+    gepr_no_spatial = 1 - (false_alerts_no_spatial / n_obs if n_obs > 0 else 0)
+    print(f"GEPR with Spatial Evidence: {gepr:.4f}")
+    print(f"GEPR without Spatial Evidence: {gepr_no_spatial:.4f}")
 
     print("\n[OK] Evaluation Complete.")
 
