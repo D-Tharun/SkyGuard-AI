@@ -50,12 +50,30 @@ class TemporalLSTMAE:
         
     def train(self, df_clean, epochs=20, batch_size=128):
         """Train the LSTM Autoencoder on clean historical sequences."""
-        # Scale data
+        if 'station' not in df_clean.columns:
+            raise ValueError("Dataframe must contain 'station' column to generate causal sequences without leakage.")
+            
+        df_clean = df_clean.copy()
+        
+        # Fit scaler on the entire clean dataset
         data_values = df_clean[self.features].values
         scaled_data = self.scaler.fit_transform(data_values)
         
-        # Create sequences
-        X_seq = self._create_sequences(scaled_data)
+        # Add scaled data back temporarily to allow station grouping
+        scaled_cols = [f + '_scaled' for f in self.features]
+        df_clean[scaled_cols] = scaled_data
+        
+        all_sequences = []
+        for station_name, group in df_clean.groupby('station'):
+            station_scaled_data = group[scaled_cols].values
+            seqs = self._create_sequences(station_scaled_data)
+            if len(seqs) > 0:
+                all_sequences.append(seqs)
+                
+        if len(all_sequences) > 0:
+            X_seq = np.vstack(all_sequences)
+        else:
+            raise ValueError("No sequences could be created. Is the data length per station less than sequence_length?")
         
         if self.model is None:
             self.model = self._build_model(X_seq.shape[2])
@@ -80,24 +98,44 @@ class TemporalLSTMAE:
         Predict anomaly scores based on Mean Absolute Error (MAE) of reconstruction.
         Returns a normalized score array aligned with the dataframe (padded with 0s at the start).
         """
+        if 'station' not in df.columns:
+            raise ValueError("Dataframe must contain 'station' column for correct sequence alignment.")
+            
+        df = df.copy()
         data_values = df[self.features].values
         scaled_data = self.scaler.transform(data_values)
-        X_seq = self._create_sequences(scaled_data)
         
-        # Reconstruct sequences
-        X_pred = self.model.predict(X_seq, verbose=0)
+        scaled_cols = [f + '_scaled' for f in self.features]
+        df[scaled_cols] = scaled_data
         
-        # Calculate MAE for each sequence (average across time steps and features)
-        mae = np.mean(np.abs(X_pred - X_seq), axis=(1, 2))
-        
-        # Normalize MAE to [0, 1] range robustly
-        # Data was scaled to [0,1]. Normal MAE is usually < 0.05. Anomalous is > 0.1.
-        norm_scores = np.clip(mae / 0.2, 0, 1)
-            
-        # Pad the start of the array to match original dataframe length
-        # (Since first sequence_length points don't have a full history window)
+        # Initialize padded scores for all rows
         padded_scores = np.zeros(len(df))
-        padded_scores[self.sequence_length:] = norm_scores
+        
+        for station_name, group in df.groupby('station'):
+            station_indices = group.index
+            station_scaled_data = group[scaled_cols].values
+            
+            if len(station_scaled_data) <= self.sequence_length:
+                continue
+                
+            X_seq = self._create_sequences(station_scaled_data)
+            
+            # Reconstruct sequences
+            X_pred = self.model.predict(X_seq, verbose=0)
+            
+            # Calculate MAE for each sequence (average across time steps and features)
+            mae = np.mean(np.abs(X_pred - X_seq), axis=(1, 2))
+            
+            # Normalize MAE to [0, 1] range robustly
+            # Data was scaled to [0,1]. Normal MAE is usually < 0.05. Anomalous is > 0.1.
+            norm_scores = np.clip(mae / 0.2, 0, 1)
+                
+            # Pad the start of the array to match original dataframe length for this station
+            station_padded_scores = np.zeros(len(group))
+            station_padded_scores[self.sequence_length:] = norm_scores
+            
+            # Assign back to original dataframe indices
+            padded_scores[station_indices] = station_padded_scores
         
         return padded_scores
         
@@ -122,12 +160,21 @@ if __name__ == "__main__":
     np.random.seed(42)
     tf.random.set_seed(42)
     
-    # Generate 500 hours of fake normal data
-    temp = 25 + 5 * np.sin(np.linspace(0, 50, 500))
-    rh = 60 + 20 * np.cos(np.linspace(0, 50, 500))
-    pres = 1010 + np.random.normal(0, 0.5, 500)
+    # Generate 500 hours of fake normal data for 2 stations
+    temp1 = 25 + 5 * np.sin(np.linspace(0, 50, 250))
+    rh1 = 60 + 20 * np.cos(np.linspace(0, 50, 250))
+    pres1 = 1010 + np.random.normal(0, 0.5, 250)
     
-    df = pd.DataFrame({'temperature_c': temp, 'relative_humidity_pct': rh, 'surface_pressure_hpa': pres})
+    temp2 = 15 + 5 * np.sin(np.linspace(0, 50, 250))
+    rh2 = 80 + 10 * np.cos(np.linspace(0, 50, 250))
+    pres2 = 900 + np.random.normal(0, 0.5, 250)
+    
+    temp = np.concatenate([temp1, temp2])
+    rh = np.concatenate([rh1, rh2])
+    pres = np.concatenate([pres1, pres2])
+    stations = ['Station_A'] * 250 + ['Station_B'] * 250
+    
+    df = pd.DataFrame({'temperature_c': temp, 'relative_humidity_pct': rh, 'surface_pressure_hpa': pres, 'station': stations})
     
     lstm_ae = TemporalLSTMAE(sequence_length=12, latent_dim=8)
     
@@ -135,10 +182,11 @@ if __name__ == "__main__":
     lstm_ae.train(df, epochs=3, batch_size=32)
     
     # Inject a temporal anomaly (wrong shape, e.g. sudden square wave)
-    df.loc[300:310, 'temperature_c'] = 35.0
+    df.loc[150:160, 'temperature_c'] = 35.0
     
     scores = lstm_ae.predict(df)
     df['lstm_score'] = scores
     
-    print(f"Max score during normal period (idx 100): {df.loc[100, 'lstm_score']:.3f}")
-    print(f"Max score during anomaly period (idx 310): {df.loc[310, 'lstm_score']:.3f}")
+    print(f"Max score during normal period (idx 50): {df.loc[50, 'lstm_score']:.3f}")
+    print(f"Max score during anomaly period (idx 160): {df.loc[160, 'lstm_score']:.3f}")
+
