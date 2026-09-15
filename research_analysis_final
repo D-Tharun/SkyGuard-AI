@@ -1,0 +1,448 @@
+# SkyGuard AI — Research Analysis for Team
+## SIH 2026 · Problem Statement 26073
+### AI/ML-Based Intelligent Anomaly Detection for Automatic Weather Stations
+**Organization**: India Meteorological Department (IMD), Ministry of Earth Sciences
+
+---
+
+*Prepared after two rounds of deep technical review. Everything below has been cross-checked against the official PS requirements and recent meteorological QC research. This document is what we've finalized — read it fully before we start building.*
+
+---
+
+## 1. The Problem — In Plain Language
+
+India's weather forecasting depends on **Automatic Weather Stations (AWS)** spread across the country. These stations measure **temperature, atmospheric pressure, and relative humidity** every few minutes and transmit the data over cellular/satellite networks.
+
+**The problem**: These readings often go wrong.
+
+| What Goes Wrong | Example |
+|---|---|
+| Sensor spike | Temperature jumps from 32°C to 55°C for one reading, then returns to 33°C |
+| Sensor freeze | Humidity reads exactly 67.2% for 3 hours straight — the sensor is stuck |
+| Calibration drift | Temperature slowly drifts +2°C over weeks — nobody notices until forecasts degrade |
+| Communication error | Data packets go missing, arrive duplicated, or contain corrupted values |
+| Physical damage | Spider webs, bird droppings, water ingress — sensor gives physically impossible readings |
+
+**Why this matters**: Wrong weather data → wrong forecasts → wrong disaster warnings → people die.
+
+**Why it's hard**: The current method is simple threshold checks (reject if temp > 55°C). But this fails because:
+- A 48°C reading in Rajasthan in May is **real weather**, not a fault
+- A sensor drifting +0.5°C over 2 weeks looks perfectly normal at any single moment
+- During a genuine cyclone, all three parameters change rapidly — a dumb system would flag everything
+
+### The Core Challenge
+
+> **It's easy to detect unusual weather. The hard part is deciding whether an unusual observation is caused by the atmosphere or by a broken sensor.**
+
+That single sentence is the entire project. Everything we build serves that question.
+
+---
+
+## 2. What the PS Specifically Asks For
+
+| Requirement | Priority | Our Coverage |
+|---|---|---|
+| Real-time anomaly detection | 🔴 Must have | ✅ Streaming pipeline with edge + server |
+| Detect spikes, frozen values, communication errors | 🔴 Must have | ✅ Dedicated detectors for each |
+| Learn temporal and seasonal patterns | 🔴 Must have | ✅ LSTM Autoencoder + time/season features |
+| Multivariate consistency (T + P + RH together) | 🔴 Must have | ✅ Physics engine + cross-variable ML |
+| Confidence scores | 🟡 Important | ✅ Anomaly Fusion Score (0–1) |
+| Explainable AI (SHAP/LIME preferred) | 🟡 Important | ✅ SHAP + human-readable explanations |
+| Root-cause classification | 🟡 Important | ✅ 6-class fault taxonomy |
+| Sensor degradation prediction | 🟡 Important | ✅ Sensor Health Index (risk-based, not predictive timeline) |
+| Corrected/imputed values | 🟢 Optional | ✅ Optional imputation, raw data never overwritten |
+| Edge AI on ESP32 | 🟢 Bonus | ✅ Lightweight statistical QC on ESP32 |
+| Visualization dashboard | 🟡 Important | ✅ Real-time web dashboard |
+| Evaluated on anomaly-injected data | Required | ✅ We inject faults into real weather data |
+
+**Bottom line**: We cover every single requirement. The PS even explicitly suggests SHAP/LIME and ESP32, which we use.
+
+---
+
+## 3. What Exists Today and Why It's Not Enough
+
+| Approach | How It Works | Fatal Flaw |
+|---|---|---|
+| **Threshold QC** (current IMD method) | Hard rules: reject if T > 55°C | Can't detect context-dependent anomalies. Can't detect drift. High false alarms during real extreme weather. |
+| **Statistical methods** (Z-score, IQR) | Flag values beyond 3σ from rolling mean | Assumes data is Gaussian (weather isn't). Seasonal shifts cause false alarms. No root-cause info. |
+| **Isolation Forest** (academic papers) | Unsupervised outlier detection in feature space | No temporal awareness — treats each reading independently. Can't distinguish anomaly types. |
+| **LSTM Autoencoders** (research, e.g. Met Éireann 2026) | Learns normal temporal patterns; high reconstruction error = anomaly | Can flag genuine weather events (rain, cloud, fronts) as anomalies. No root-cause classification. Not designed for edge deployment. |
+| **Commercial solutions** (Tomorrow.io, Campbell Scientific) | Proprietary black-box QC | Expensive. Not open-source. Not designed for Indian climate diversity. No edge capability. |
+
+**Key insight from recent research**: A 2026 Met Éireann/Cambridge study tested LSTM autoencoders for meteorological QC. The LSTM was the best model for temporal pattern detection — but it sometimes flagged genuine rapid weather changes (rainfall, cloud cover) as anomalies. That's exactly our problem, and exactly where our multi-signal fusion approach adds value.
+
+### What's Missing From ALL Existing Solutions
+
+Nobody combines **all** of these together:
+- Edge-level first-pass detection
+- Temporal deep learning
+- Physics-based atmospheric consistency
+- Contextual awareness (season, time, station baseline)
+- Multi-signal fusion into a single decision
+- Root-cause classification with explanations
+- Sensor health tracking
+
+That combination is our project.
+
+---
+
+## 4. Our Solution — SkyGuard AI
+
+### Architecture Overview
+
+```
+BME280 Sensor(s)  ─→  ESP32 Edge QC  ─→  Server QC Engine  ─→  Dashboard
+    (T, RH, P)        (fast checks)       (ML + Physics +       (alerts,
+                                            Fusion Score)        health,
+                                                                 XAI)
+```
+
+### Detailed Flow
+
+```
+  Sensor reading arrives
+         │
+         ▼
+  ┌─ ESP32 EDGE ────────────────────────────┐
+  │  Range check: is T between -50 and 60?  │
+  │  Rate check: did T change > 15°C/5min?  │
+  │  Freeze check: same value 10+ times?    │
+  │  → Produces: edge_score (pass/suspect)  │
+  └──────────────┬──────────────────────────┘
+                 │ Wi-Fi
+                 ▼
+  ┌─ SERVER QC ENGINE ─────────────────────────────────────┐
+  │                                                         │
+  │  Layer 0: Data integrity (NaN, duplicates, gaps)        │
+  │  Layer 1: Statistical QC (spike, frozen, persistence)   │
+  │  Layer 2: ML models                                     │
+  │    ├── LSTM Autoencoder → temporal_score                │
+  │    └── Isolation Forest → multivariate_score            │
+  │  Layer 3: Physics engine                                │
+  │    ├── Dew point, vapor pressure, VPD                   │
+  │    └── Consistency checks → physics_score               │
+  │  Layer 4: Context (time, season, baseline)              │
+  │    └── → context_score                                  │
+  │                                                         │
+  │  ★ ANOMALY FUSION ★                                     │
+  │  Combine all scores with learned weights:               │
+  │  Fusion = w₁·edge + w₂·temporal + w₃·multivariate      │
+  │         + w₄·physics + w₅·context + w₆·spatial          │
+  │                                                         │
+  │  Fusion < 0.3 → ✅ PASS                                 │
+  │  Fusion 0.3-0.6 → ⚠️ SUSPECT                           │
+  │  Fusion > 0.6 → 🔴 FAIL → diagnose fault type          │
+  │                                                         │
+  │  Layer 5: Diagnosis                                     │
+  │    ├── Fault type (1 of 6 classes)                      │
+  │    ├── Confidence score                                 │
+  │    ├── SHAP explanation                                 │
+  │    ├── Human-readable text                              │
+  │    └── Sensor health update                             │
+  └────────────────────────────────────────────────────────┘
+         │
+         ▼
+  ┌─ DASHBOARD ──────────────────────────────┐
+  │  Real-time charts                        │
+  │  Alert feed with fusion breakdown        │
+  │  Sensor health panel                     │
+  │  India map with station markers          │
+  │  SHAP visualizations                     │
+  └──────────────────────────────────────────┘
+```
+
+### The Anomaly Fusion Score — Why It Matters
+
+This is the mathematical heart of our system. When a judge asks *"Why did your system decide this is a fault?"*, we show:
+
+```
+  Fusion Score: 0.82 (FAIL)
+  
+  Temporal ML:   0.88  ████████░░  (LSTM says this pattern is unusual)
+  Physics:       0.79  ███████░░░  (dew point is physically inconsistent)
+  Multivariate:  0.71  ███████░░░  (outlier in feature space)
+  Context:       0.62  ██████░░░░  (unusual for this time/season)
+  Edge QC:       1.00  ██████████  (rate-of-change exceeded)
+  
+  → Multiple independent signals agree. High confidence.
+```
+
+**No single point of failure.** One confused model can't cause a false alarm alone. The decision comes from agreement across independent detection approaches.
+
+---
+
+## 5. What Makes Us Different — Our Innovations
+
+These are the 8 points we present to judges. Each is carefully worded to be **defensible** — no overclaiming.
+
+| # | Innovation | What We Say | What We DON'T Say |
+|---|---|---|---|
+| 1 | **Hybrid edge-cloud architecture** | "Our distinguishing design choice is edge QC on ESP32 for fast local detection + deep server-side analysis" | ~~"No existing solution does this"~~ |
+| 2 | **Anomaly Fusion Score** | "Multiple independent signals fused into a single explainable decision" | ~~"Our AI is smarter than everything else"~~ |
+| 3 | **Physics-informed features** | "Derived atmospheric quantities (dew point, saturation vapor pressure, VPD) as model features" | ~~"We use Clausius-Clapeyron to detect anomalies"~~ |
+| 4 | **6-class fault taxonomy** | "Actionable root-cause classification" | ~~"We detect every possible fault"~~ |
+| 5 | **Two-level explainability** | "SHAP for model transparency + natural language for operators" | ~~"Fully explainable AI"~~ |
+| 6 | **Sensor Health Index** | "Tracks degradation trajectory, recommends inspection" | ~~"Predicts sensor failure in X days"~~ |
+| 7 | **Self-healing data quality** | "Quarantines anomalous data, optionally estimates corrections, never overwrites originals" | ~~"Self-healing sensor network"~~ |
+| 8 | **Station-specific baselines** | "Supports India's climatic diversity from deserts to coasts" | ~~"Existing solutions can't handle Indian climate"~~ |
+
+> [!CAUTION]
+> **READ THE "WHAT WE DON'T SAY" COLUMN CAREFULLY.** Every crossed-out phrase sounds impressive but would get us destroyed by a technical judge. We win on substance, not hype.
+
+---
+
+## 6. The Physics We Use (Simplified)
+
+We don't just throw data at ML models. We compute **derived atmospheric quantities** that have real physical meaning:
+
+| What We Compute | What It Tells Us |
+|---|---|
+| **Dew Point** (Magnus formula) | The temperature at which air becomes saturated. Must ALWAYS be ≤ actual temperature. If our computation gives dew point > temperature → something is physically impossible → sensor fault |
+| **Saturation Vapor Pressure** | Maximum moisture air can hold at current temperature. Computed from Clausius-Clapeyron equation — used as a **feature**, not a rule |
+| **Actual Vapor Pressure** | How much moisture is actually in the air right now |
+| **Vapor Pressure Deficit (VPD)** | Gap between what air *could* hold and what it *does* hold. Combines T and RH into one meaningful metric |
+| **Absolute Humidity** | Grams of water per cubic meter. Provides a temperature-normalized moisture measure that complements RH |
+
+These become **features** fed into our ML models and **consistency checks** in the physics scoring layer. They are NOT hard rules — they produce soft scores.
+
+---
+
+## 7. The 6 Fault Types We Detect
+
+| # | Fault | What It Looks Like | How We Catch It |
+|---|---|---|---|
+| 1 | **Spike** | Temperature: 32→33→**55**→34 | Rate-of-change check + LSTM temporal model |
+| 2 | **Frozen** | Humidity: 67.2, 67.2, 67.2, 67.2... | Persistence counter + near-zero variance |
+| 3 | **Drift** | Temperature slowly shifts +2°C over days | Trend analysis + LSTM baseline deviation |
+| 4 | **Communication** | Missing data, NaN values, duplicate timestamps | Data integrity pattern detection |
+| 5 | **Physical Inconsistency** | Values individually OK but combination is impossible | Physics engine (dew point, cross-variable) |
+| 6 | **Range Violation** | Temperature = -80°C (physically impossible) | Hard range checks |
+
+---
+
+## 8. How We Evaluate — Our Metrics
+
+### Signature Metric
+
+> **False Positive Rate during genuine weather events**
+
+This is what separates us from simple systems. Can we let real extreme weather pass while still catching sensor faults?
+
+### Why NOT Just "Accuracy"
+
+If 99.5% of readings are normal, a model that says *"everything is fine"* gets 99.5% accuracy while catching zero faults. Useless. We report:
+
+| Metric | What It Really Means |
+|---|---|
+| **Precision** | "Of everything we flagged, how much was actually a fault?" |
+| **Recall** | "Of all real faults, how many did we catch?" |
+| **F1-Score** | Balance between precision and recall |
+| **FPR (weather events)** | ★ "Did we accidentally reject genuine extreme weather?" |
+| **Detection Latency** | "How fast after a fault appears do we alert?" |
+| **Per-class F1** | "How well do we classify each of the 6 fault types?" |
+
+### The Most Important Test Case
+
+| Scenario | Correct Result |
+|---|---|
+| Heatwave: temperature climbs to 47°C over 6 hours with consistent humidity and pressure changes | ✅ **NOT a fault** — real weather |
+
+If our system flags a genuine heatwave as a sensor fault, we have failed the central challenge.
+
+---
+
+## 9. Data Strategy
+
+We use 4 tiers of data, each serving a different purpose:
+
+### Tier 1: Real Observations (for validation — strongest evidence)
+
+**Source**: NOAA Integrated Surface Database (ISD)
+- URL: https://www.ncei.noaa.gov/products/land-based-station/integrated-surface-database
+- Actual hourly readings from physical weather stations, including Indian IMD stations
+- Free to download
+- **These are real sensor observations** — closest to what IMD AWS produces
+
+**Also check**: https://data.gov.in for any IMD-published datasets
+
+### Tier 2: Reanalysis Data (for training normal patterns)
+
+**Source**: Open-Meteo Historical Weather API
+- URL: https://open-meteo.com/en/docs/historical-weather-api
+- Hourly temperature, humidity, pressure for any location from 1940 onwards
+- Free for non-commercial use; JSON via simple API call
+- **Important**: This is model-derived data (ERA5 reanalysis), not raw sensor output. Excellent for learning what "normal weather" looks like, but won't contain sensor-specific faults
+- We'll download data for 8 Indian cities spanning different climate zones (Delhi, Mumbai, Chennai, Jaisalmer, Shimla, Cherrapunji, Bengaluru, Guwahati)
+
+### Tier 3: Anomaly Injection (for evaluation metrics)
+
+**Source**: We build this ourselves
+- Take real weather data from Tier 1 or 2
+- Programmatically inject each of our 6 fault types with known labels
+- Ground-truth labels allow precise metric calculation
+- Each fault type has multiple variations (different amplitudes, durations, recovery shapes)
+- The PS explicitly says evaluation will use anomaly-injected data — so this is exactly right
+
+### Tier 4: Live Sensor (for physical demo)
+
+**Source**: Our ESP32 + BME280 hardware
+- Real-time data from our own sensor
+- Shows the complete pipeline: sensor → edge QC → server → dashboard
+- Anomalies created by physically disturbing the sensor
+
+---
+
+## 10. Hardware — What We Need to Buy
+
+### Total cost: ₹1,300 – ₹1,700
+
+| Item | Qty | Cost | Where to Buy | Priority |
+|---|---|---|---|---|
+| **ESP32 DevKit V1** | 1 | ₹400-500 | Robu.in, Amazon.in | 🔴 Must |
+| **BME280 Sensor Module** | 1 | ₹250-350 | Robu.in, Amazon.in | 🔴 Must |
+| **BME280 #2** | 1 | ₹250-350 | Same | 🟠 Strongly recommended |
+| **Breadboard** | 1 | ₹50-80 | Any electronics shop | 🔴 Must |
+| **Jumper Wires** (M-M, M-F) | 1 set | ₹50-80 | Any electronics shop | 🔴 Must |
+| **Micro USB Cable** | 1 | ₹100 | Probably have one | 🔴 Must |
+| **0.96" OLED Display** (SSD1306) | 1 | ₹200-250 | Robu.in, Amazon.in | 🟠 Recommended |
+
+### Why BME280?
+
+One chip gives us ALL THREE required parameters (temperature + pressure + humidity) over a simple 2-wire I2C connection. Bosch-specified: ±3% RH accuracy, 300–1100 hPa pressure range, -40 to +85°C. Perfect for a prototype.
+
+We frame it to judges as: *"We use BME280 as a compact prototype sensor node to reproduce the three required AWS variables"* — NOT as a professional IMD-grade sensor.
+
+### Why Two BME280s?
+
+Two sensors on the same ESP32 (different I2C addresses) lets us demonstrate **spatial consistency checking** physically:
+- Corrupt one sensor → system detects which one is faulty by comparing with the other
+- Judges can see this with their own eyes — much more convincing than a graph on screen
+
+### Wiring (Simple)
+
+```
+ESP32 Pin 21 (SDA) ──→ shared data line for all I2C devices
+ESP32 Pin 22 (SCL) ──→ shared clock line for all I2C devices
+ESP32 3.3V         ──→ power for all modules
+ESP32 GND          ──→ ground for all modules
+
+BME280 #1: SDO → GND  (address 0x76)
+BME280 #2: SDO → 3.3V (address 0x77)
+```
+
+> [!WARNING]
+> **Order hardware NOW.** You need at least a week to verify it works, debug I2C wiring, and get comfortable with the sensor readings before the hackathon.
+
+---
+
+## 11. Software Stack
+
+| Layer | Tech | Why |
+|---|---|---|
+| **Edge firmware** | Arduino C++ on ESP32 | Industry standard for ESP32, large library ecosystem |
+| **ML models** | Python + TensorFlow (LSTM-AE) + scikit-learn (Isolation Forest, Random Forest) | Best supported ML ecosystem |
+| **Explainability** | SHAP library | PS specifically suggests SHAP; well-documented |
+| **Backend API** | FastAPI + WebSockets | Fast, modern, real-time streaming support |
+| **Dashboard** | HTML + CSS + JS + Chart.js + Leaflet.js | Fast to build, no framework overhead |
+| **Data** | pandas + numpy | Standard data science stack |
+
+---
+
+## 12. Demo Scenarios We'll Show Judges
+
+### Demo A — ✅ Real Weather (Must NOT alert)
+Gradual temperature rise with consistent humidity/pressure changes. System correctly says **NORMAL**.
+
+### Demo B — 🔴 Sensor Spike (Must detect)
+Sudden temperature jump with no humidity/pressure response. System flags it with **94% confidence**, classifies as **SPIKE**, shows fusion score breakdown.
+
+### Demo C — ⚠️ Gradual Drift (Subtle detection)
+Temperature slowly shifts +1.4°C over hours. System tracks **Health Index declining** from 72 → 63, recommends inspection.
+
+### Demo D — ⚠️ Temporal + Spatial Inconsistency
+Station A shows rapid temperature drop, Station B is stable. Individual values are plausible — but the **spatial disagreement + missing pressure signature** makes sensor fault likely. System explains the reasoning.
+
+### Demo E — 🔧 Live Hardware
+ESP32 streaming to dashboard in real-time. Cover sensor with hand → temperature change detected and analyzed → demonstrate edge flags arriving before server-side analysis.
+
+---
+
+## 13. Team Preparation — What Each Person Should Do Before We Build
+
+### ML Person(s)
+- [ ] Understand LSTM Autoencoders: what is reconstruction error, how is it used as anomaly score
+- [ ] Understand Isolation Forest: how it works on feature vectors (not time series)
+- [ ] Read about SHAP: TreeExplainer for Random Forest, how to generate feature importance plots
+- [ ] Understand the Anomaly Fusion Score concept from our plan
+
+### Backend Person
+- [ ] Install Python 3.9+, FastAPI, uvicorn
+- [ ] Understand WebSocket basics (for real-time data streaming to dashboard)
+- [ ] Understand how to read serial data from ESP32 via pyserial
+
+### Frontend Person
+- [ ] Understand Chart.js or Plotly.js for real-time updating charts
+- [ ] Understand Leaflet.js basics for map with station markers
+- [ ] Plan dashboard layout: live charts, alert feed, health panel, fusion breakdown
+
+### Hardware Person
+- [ ] Install Arduino IDE 2.x + ESP32 board support
+- [ ] Test BME280 connection and read T/P/RH values
+- [ ] Get WiFi HTTP POST working from ESP32 to laptop
+- [ ] If OLED display: test SSD1306 library
+
+### Everyone
+- [ ] Read this document fully
+- [ ] Understand the 6 fault types and why each matters
+- [ ] Understand the central theme: **weather vs sensor — that's the hard problem**
+- [ ] Know what NOT to say to judges (Section 5, right column)
+
+---
+
+## 14. Build Priority — If We Run Out of Time
+
+If time is tight during the hackathon, here's what to cut and what to keep:
+
+| Priority | What | Why |
+|---|---|---|
+| 🔴 **Never cut** | Working sensor → edge → server pipeline | Without this, nothing works |
+| 🔴 **Never cut** | Spike + frozen detection | Most basic anomaly detection |
+| 🔴 **Never cut** | Anomaly Fusion Score | Our core innovation |
+| 🟡 **Cut reluctantly** | LSTM Autoencoder | Falls back to statistical methods only |
+| 🟡 **Cut reluctantly** | SHAP explanations | Falls back to rule-based explanations only |
+| 🟢 **Cut if needed** | Sensor Health Index | Nice to have but not core |
+| 🟢 **Cut if needed** | Data imputation/correction | PS makes this explicitly optional |
+| 🟢 **Cut if needed** | Map visualization | Can demo with charts only |
+| 🟢 **Cut if needed** | Second BME280 spatial demo | Can explain concept without hardware |
+
+---
+
+## 15. Key References
+
+| Reference | Relevance |
+|---|---|
+| Met Éireann/Cambridge 2026 study (Environmental Data Science) | LSTM-AE for meteorological QC; validates our temporal model choice; documents the weather-vs-sensor problem we solve |
+| WMO Guide to Meteorological Instruments and Methods of Observation | Standard QC layers (range, step, persistence, consistency, spatial) that our architecture mirrors |
+| Bosch BME280 Datasheet | Sensor specifications we cite in our prototype framing |
+| SHAP Documentation (shap.readthedocs.io) | Explainability approach the PS specifically recommends |
+
+---
+
+## 16. Open Questions for the Team
+
+Please think about these before we start building:
+
+1. **Hardware status** — Does anyone already have an ESP32 or BME280? If not, who's ordering?
+
+2. **Team roles** — Who's taking ML, backend, frontend, hardware? We need clear ownership.
+
+3. **Timeline** — When is the hackathon? We need to know how aggressively to prioritize.
+
+4. **Dashboard tech** — Plain HTML+CSS+JS is faster to build. React/Next.js is more polished. What's our frontend person most comfortable with?
+
+5. **Laptop specs** — Training the LSTM will need a decent machine. Who has the best GPU/CPU?
+
+---
+
+> [!TIP]
+> **One final thought**: Our project isn't trying to be the most complex AI system. It's trying to answer one question really well: *"Is this unusual reading a broken sensor or real weather?"* Every component we build should serve that question. If something doesn't help answer it, we don't need it.
