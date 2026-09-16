@@ -1,6 +1,6 @@
 import { Station, AnomalyAlert, DemoScenario, SensorReading } from '../types';
 
-const API_BASE_URL = 'http://localhost:8000/api';
+const API_BASE_URL = '/api';
 
 export async function fetchHealth(): Promise<{ status: string, backend: string, version: string }> {
   const response = await fetch(`${API_BASE_URL}/health`);
