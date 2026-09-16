@@ -127,7 +127,7 @@ class TemporalLSTMAE:
             raise ValueError("Dataframe must contain 'station' column for correct sequence alignment.")
             
         df = df.copy()
-        data_values = df[self.features].astype(float).values
+        data_values = df[self.features].astype(float).values.copy()
         
         # Safely handle missing/corrupt data before scaling/inference
         # Mask -999.0, 9999.0 as NaN

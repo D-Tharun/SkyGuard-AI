@@ -35,44 +35,13 @@ st.markdown("*Differentiating between Sensor Faults and Genuine Extreme Meteorol
 
 @st.cache_data
 def load_and_process_data(disable_spatial=False):
-    file_path = os.path.join(BASE_DIR, 'data', 'processed', 'delhi_benchmark_injected.csv')
-    if not os.path.exists(file_path):
-        st.error(f"Dataset not found at {file_path}. Please run `python src/data/generate_demo_scenario.py`.")
-        return pd.DataFrame()
-        
-    df = pd.read_csv(file_path)
-    
-    # 1. Physics Engine
-    phys = PhysicsEngine()
-    df = phys.add_derived_features(df)
-    df['physics_score'] = phys.run_physics_checks(df)
-    
-    # 2. Stat Engine
-    stat = StatisticalQCEngine()
-    df['stat_score'], df['spike_flag'], df['freeze_flag'] = stat.run_statistical_checks(df)
-    
-    # 3. Real ML Inference
-    from src.models.iforest_model import MultivariateIForest
-    from src.models.lstm_ae_model import TemporalLSTMAE
-    
+    from src.backend_service import SkyGuardService
+    service = SkyGuardService()
     try:
-        iforest = MultivariateIForest()
-        iforest.load(os.path.join(BASE_DIR, 'models', 'iforest_v2.pkl'))
-        
-        lstm_ae = TemporalLSTMAE()
-        lstm_ae.load(os.path.join(BASE_DIR, 'models', 'lstm_ae_v2'))
-        
-        df['if_score'] = iforest.predict(df)
-        df['lstm_score'] = lstm_ae.predict(df)
+        return service.load_and_process_data(disable_spatial)
     except Exception as e:
-        st.error(f"Failed to load ML artifacts: {e}. Please ensure Kaggle weights are downloaded.")
+        st.error(str(e))
         st.stop()
-    
-    # 4. Fusion Engine
-    fusion = EventAwareFusionEngine()
-    df = fusion.run_fusion(df, disable_spatial=disable_spatial)
-    
-    return df
 
 # Initialize session state for scenario loading
 if 'current_scenario' not in st.session_state:
@@ -101,46 +70,11 @@ if df.empty:
 if selected_scenario != st.session_state.current_scenario:
     st.session_state.current_scenario = selected_scenario
     
-    if selected_scenario == "A. Normal Weather":
-        # Find first normal point
-        normal_cases = df[df['final_state'] == 'NORMAL']
-        if not normal_cases.empty:
-            normal_idx = normal_cases.index[0]
-            st.session_state.target_station = df.loc[normal_idx, 'station']
-            st.session_state.target_idx = len(df[(df['station'] == st.session_state.target_station) & (df.index <= normal_idx)]) - 1
-
-    elif selected_scenario == "B. Isolated Sensor Fault":
-        fault_cases = df[(df['final_state'].str.contains('FAULT')) & (df['final_state'] != 'GENUINE_EXTREME_EVENT') & (df['S_event'] < 0.3)]
-        if not fault_cases.empty:
-            fault_idx = fault_cases.index[0]
-            st.session_state.target_station = df.loc[fault_idx, 'station']
-            st.session_state.target_idx = len(df[(df['station'] == st.session_state.target_station) & (df.index <= fault_idx)]) - 1
-
-    elif selected_scenario == "C. Genuine Regional Event (Heatwave)":
-        event_cases = df[df['final_state'] == 'GENUINE_EXTREME_EVENT']
-        if not event_cases.empty:
-            event_idx = event_cases.index[0]
-            st.session_state.target_station = df.loc[event_idx, 'station']
-            st.session_state.target_idx = len(df[(df['station'] == st.session_state.target_station) & (df.index <= event_idx)]) - 1
-
-    elif selected_scenario == "D. Example: genuine event + one faulty station":
-        # Find a fault that occurs during an event
-        event_faults = df[(df['final_state'].str.contains('FAULT')) & (df['S_event'] >= 0.5)]
-        if not event_faults.empty:
-            idx = event_faults.index[0]
-            st.session_state.target_station = df.loc[idx, 'station']
-            st.session_state.target_idx = len(df[(df['station'] == st.session_state.target_station) & (df.index <= idx)]) - 1
-        else:
-            st.session_state.target_station = df['station'].iloc[0]
-            st.session_state.target_idx = 0
-
-    elif selected_scenario == "E. Spatial Logic Disabled (Demonstrate fallback)":
-        # Use same event fault to show it misclassifies, or just an extreme event misclassified as fault
-        faults_without_spatial = df[df['final_state'].str.contains('FAULT')]
-        if not faults_without_spatial.empty:
-            fault_idx = faults_without_spatial.index[0]
-            st.session_state.target_station = df.loc[fault_idx, 'station']
-            st.session_state.target_idx = len(df[(df['station'] == st.session_state.target_station) & (df.index <= fault_idx)]) - 1
+    from src.backend_service import SkyGuardService
+    service = SkyGuardService()
+    target_station, target_idx = service.get_scenario_target(df, selected_scenario)
+    st.session_state.target_station = target_station
+    st.session_state.target_idx = target_idx
 
 if 'target_station' not in st.session_state:
     st.session_state.target_station = df['station'].iloc[0]

@@ -1,0 +1,6 @@
+{
+  "name": "SkyGuard QC",
+  "description": "Professional Automatic Weather Station (AWS) quality control system distinguishing sensor faults from genuine meteorological events.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
